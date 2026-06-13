@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh
+
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+          terraform_wrapper: false
+
+      - name: Start mock Slack webhook
+        run: |
+          mkdir -p /tmp/slack-mock
+          cat > /tmp/slack-mock/server.py <<'EOF'
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          import pathlib
+          count = 0
+          class Handler(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  global count
+                  count += 1
+                  body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                  pathlib.Path(f'/tmp/slack-mock/payload-{count}.json').write_bytes(body)
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b'ok')
+              def log_message(self, *args):
+                  pass
+          HTTPServer(('127.0.0.1', 8765), Handler).serve_forever()
+          EOF
+          nohup python3 /tmp/slack-mock/server.py >/dev/null 2>&1 &
+
+      - name: Seed fixture state (apply baseline)
+        working-directory: test/fixtures/simple
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+
+      - name: 'Case 1: clean state — no drift expected'
+        id: clean
+        uses: ./
+        with:
+          working-directory: test/fixtures/simple
+          environment: ci-clean
+          upload-plan-artifact: 'false'
+
+      - name: Assert clean
+        run: |
+          test "${{ steps.clean.outputs.drift-detected }}" = "false"
+          test "${{ steps.clean.outputs.exit-code }}" = "0"
+
+      - name: 'Case 2: drifted state — drift expected, Slack notified'
+        id: drift
+        uses: ./
+        with:
+          working-directory: test/fixtures/simple
+          environment: ci-drift
+          plan-args: '-var=content=drifted'
+          production: 'true'
+          slack-webhook-url: 'http://127.0.0.1:8765'
+          fail-on-drift: 'false'
+          upload-plan-artifact: 'false'
+
+      - name: Assert drift detected and Slack payload sent
+        env:
+          SUMMARY: ${{ steps.drift.outputs.summary }}
+        run: |
+          test "${{ steps.drift.outputs.drift-detected }}" = "true"
+          test "${{ steps.drift.outputs.exit-code }}" = "2"
+          printf '%s' "$SUMMARY" | jq -e '.drift_detected == true and (.resources | length) > 0'
+          sleep 1
+          ls /tmp/slack-mock/payload-*.json
+          jq -e '(.blocks | length) > 0' /tmp/slack-mock/payload-1.json
+          grep -qi 'production' /tmp/slack-mock/payload-1.json
+
+      - name: 'Case 3: fail-on-drift makes the step fail'
+        id: drift-fail
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: test/fixtures/simple
+          environment: ci-drift-fail
+          plan-args: '-var=content=drifted'
+          upload-plan-artifact: 'false'
+
+      - name: Assert fail-on-drift failed the step
+        run: |
+          test "${{ steps.drift-fail.outcome }}" = "failure"
+          test "${{ steps.drift-fail.outputs.drift-detected }}" = "true"
+
+      - name: 'Case 4: broken config — error path (exit 1) fails the step'
+        id: error
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: test/fixtures/error
+          environment: ci-error
+          slack-webhook-url: 'http://127.0.0.1:8765'
+          upload-plan-artifact: 'false'
+
+      - name: Assert error path
+        run: |
+          test "${{ steps.error.outcome }}" = "failure"
+          test "${{ steps.error.outputs.exit-code }}" = "1"
+          test "${{ steps.error.outputs.drift-detected }}" = "false"
+          sleep 1
+          test -f /tmp/slack-mock/payload-2.json
+          grep -qi 'failed' /tmp/slack-mock/payload-2.json

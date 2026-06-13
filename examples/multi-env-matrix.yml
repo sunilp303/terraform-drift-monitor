@@ -1,0 +1,58 @@
+# Multi-environment drift detection with prod/non-prod Slack routing.
+# Production drift alerts the main webhook; dev/staging go to the quiet one.
+name: Terraform drift (all environments)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dev
+            production: 'false'
+            role-secret: DRIFT_ROLE_ARN_DEV
+          - environment: staging
+            production: 'false'
+            role-secret: DRIFT_ROLE_ARN_STAGING
+          - environment: production
+            production: 'true'
+            role-secret: DRIFT_ROLE_ARN_PROD
+    concurrency:
+      group: terraform-drift-${{ matrix.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[matrix.role-secret] }}
+          aws-region: us-east-1
+
+      - uses: OWNER/terraform-drift-detector@v1
+        with:
+          working-directory: infra
+          init-args: '-backend-config=env/${{ matrix.environment }}.hcl'
+          var-files: env/${{ matrix.environment }}.tfvars
+          environment: ${{ matrix.environment }}
+          production: ${{ matrix.production }}
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          slack-webhook-url-nonprod: ${{ secrets.SLACK_WEBHOOK_URL_NONPROD }}
+          github-issue: 'true'
+          audit-s3-bucket: ${{ secrets.AUDIT_S3_BUCKET }}
+          cloudtrail-attribution: 'true'

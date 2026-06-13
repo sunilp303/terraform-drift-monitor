@@ -1,0 +1,44 @@
+# Full AWS setup: OIDC auth, Slack alerts, GitHub Issue drift history,
+# S3 audit records, and CloudTrail attribution.
+# Prerequisite: apply examples/bootstrap-aws first (OIDC role + audit bucket).
+name: Terraform drift (AWS, full)
+
+on:
+  schedule:
+    - cron: '0 * * * *' # hourly for production
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC federation
+  issues: write   # drift issue management
+
+concurrency:
+  group: terraform-drift-prod
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DRIFT_DETECTOR_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - uses: OWNER/terraform-drift-detector@v1
+        with:
+          working-directory: infra
+          environment: production
+          production: 'true'
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          github-issue: 'true'
+          audit-s3-bucket: ${{ secrets.AUDIT_S3_BUCKET }}
+          cloudtrail-attribution: 'true'

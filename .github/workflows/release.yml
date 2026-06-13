@@ -1,0 +1,30 @@
+name: Release
+
+# On publishing a semver release (e.g. v1.2.3), move the major tag (v1)
+# so consumers pinned to @v1 pick up the new version.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  update-major-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Move major version tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MAJOR="${TAG%%.*}"
+          if [[ "$MAJOR" =~ ^v[0-9]+$ ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -f "$MAJOR" "$TAG"
+            git push -f origin "$MAJOR"
+            echo "Moved $MAJOR to $TAG"
+          else
+            echo "Tag '$TAG' is not semver-like (vX.Y.Z); skipping major tag update."
+          fi

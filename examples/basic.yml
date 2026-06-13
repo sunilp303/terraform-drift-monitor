@@ -1,0 +1,42 @@
+# Minimal scheduled drift detection.
+# Copy to .github/workflows/drift.yml in the repo containing your Terraform code,
+# replace OWNER with the org/user this action is published under, and add the
+# SLACK_WEBHOOK_URL secret.
+name: Terraform drift
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+          terraform_wrapper: false # required: the wrapper breaks output capture
+
+      # Authenticate to your cloud BEFORE the action — it never handles credentials.
+      # AWS example (OIDC, no static keys):
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ secrets.DRIFT_DETECTOR_ROLE_ARN }}
+      #     aws-region: us-east-1
+
+      - uses: OWNER/terraform-drift-detector@v1
+        with:
+          working-directory: infra
+          environment: production
+          production: 'true'
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

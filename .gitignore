@@ -1,0 +1,27 @@
+# Secrets / credentials
+.env
+*.pem
+*.key
+.aws/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+
+# General
+__pycache__/
+.venv/
+node_modules/
+.DS_Store
+*.log
+dist/
+build/
+.idea/
+.vscode/

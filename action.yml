@@ -1,0 +1,193 @@
+name: 'Terraform Drift Detector'
+description: >-
+  Detect Terraform drift on a schedule. Slack alerts for production drift,
+  a GitHub Issue drift history per environment, optional S3 audit records
+  and CloudTrail attribution of out-of-band changes.
+branding:
+  icon: 'alert-triangle'
+  color: 'purple'
+
+inputs:
+  working-directory:
+    description: 'Path to the Terraform root module.'
+    required: false
+    default: '.'
+  workspace:
+    description: 'Terraform workspace to select before planning.'
+    required: false
+    default: ''
+  var-files:
+    description: 'Newline-separated list of -var-file paths.'
+    required: false
+    default: ''
+  init-args:
+    description: 'Extra arguments for terraform init (e.g. -backend-config=env/prod.hcl).'
+    required: false
+    default: ''
+  plan-args:
+    description: 'Extra arguments for terraform plan. Space-separated; use var-files for values containing spaces.'
+    required: false
+    default: ''
+  environment:
+    description: 'Environment label used in issues, Slack messages, and audit records.'
+    required: false
+    default: 'default'
+  production:
+    description: 'Mark this environment as production for alert-level Slack routing.'
+    required: false
+    default: 'false'
+  slack-webhook-url:
+    description: 'Slack incoming webhook. Enables notifications on drift or check errors.'
+    required: false
+    default: ''
+  slack-webhook-url-nonprod:
+    description: 'Optional separate (quieter) webhook for non-production environments.'
+    required: false
+    default: ''
+  github-issue:
+    description: 'Maintain one auto-managed drift issue per environment (opened on drift, closed when clean).'
+    required: false
+    default: 'false'
+  github-token:
+    description: 'Token for issue management. Needs issues: write.'
+    required: false
+    default: ${{ github.token }}
+  upload-plan-artifact:
+    description: 'Upload plan output and summaries as a workflow artifact. Note: plan output can contain sensitive values.'
+    required: false
+    default: 'true'
+  audit-s3-bucket:
+    description: 'AWS opt-in: S3 bucket that receives a JSON audit record for every run.'
+    required: false
+    default: ''
+  cloudtrail-attribution:
+    description: 'AWS opt-in: look up recent CloudTrail write events for drifted resources.'
+    required: false
+    default: 'false'
+  cloudtrail-lookback-hours:
+    description: 'How far back to search CloudTrail for attribution.'
+    required: false
+    default: '24'
+  fail-on-drift:
+    description: 'Fail the step when drift is detected, so scheduled runs go red.'
+    required: false
+    default: 'true'
+
+outputs:
+  drift-detected:
+    description: 'true when terraform plan reported drift (exit code 2).'
+    value: ${{ steps.detect.outputs.drift-detected }}
+  exit-code:
+    description: 'Raw terraform plan exit code: 0 clean, 1 error, 2 drift.'
+    value: ${{ steps.detect.outputs.exit-code }}
+  summary:
+    description: 'JSON summary: counts, changed resources, out-of-band changes.'
+    value: ${{ steps.summarize.outputs.summary }}
+  plan-output:
+    description: 'Path to the captured human-readable plan output.'
+    value: ${{ steps.detect.outputs.plan-output }}
+  issue-url:
+    description: 'URL of the drift issue, when github-issue is enabled and drift was found.'
+    value: ${{ steps.issue.outputs.issue-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect drift (terraform plan -detailed-exitcode)
+      id: detect
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        WORKSPACE: ${{ inputs.workspace }}
+        VAR_FILES: ${{ inputs.var-files }}
+        INIT_ARGS: ${{ inputs.init-args }}
+        PLAN_ARGS: ${{ inputs.plan-args }}
+      run: bash "${{ github.action_path }}/scripts/detect.sh"
+
+    - name: Summarize plan
+      id: summarize
+      shell: bash
+      env:
+        OUT_DIR: ${{ steps.detect.outputs.out-dir }}
+        EXIT_CODE: ${{ steps.detect.outputs.exit-code }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: bash "${{ github.action_path }}/scripts/summarize.sh"
+
+    - name: CloudTrail attribution
+      if: inputs.cloudtrail-attribution == 'true' && steps.detect.outputs.exit-code == '2'
+      shell: bash
+      env:
+        OUT_DIR: ${{ steps.detect.outputs.out-dir }}
+        LOOKBACK_HOURS: ${{ inputs.cloudtrail-lookback-hours }}
+      run: bash "${{ github.action_path }}/scripts/cloudtrail_lookup.sh"
+
+    - name: Manage drift issue
+      id: issue
+      if: inputs.github-issue == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        OUT_DIR: ${{ steps.detect.outputs.out-dir }}
+        EXIT_CODE: ${{ steps.detect.outputs.exit-code }}
+        DRIFT_DETECTED: ${{ steps.detect.outputs.drift-detected }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: bash "${{ github.action_path }}/scripts/github_issue.sh"
+
+    - name: Notify Slack
+      if: >-
+        (inputs.slack-webhook-url != '' || inputs.slack-webhook-url-nonprod != '')
+        && steps.detect.outputs.exit-code != '0'
+      shell: bash
+      env:
+        OUT_DIR: ${{ steps.detect.outputs.out-dir }}
+        EXIT_CODE: ${{ steps.detect.outputs.exit-code }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        PRODUCTION: ${{ inputs.production }}
+        SLACK_WEBHOOK_URL: ${{ inputs.slack-webhook-url }}
+        SLACK_WEBHOOK_URL_NONPROD: ${{ inputs.slack-webhook-url-nonprod }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        ISSUE_URL: ${{ steps.issue.outputs.issue-url }}
+      run: bash "${{ github.action_path }}/scripts/slack_notify.sh"
+
+    - name: Write S3 audit record
+      if: inputs.audit-s3-bucket != ''
+      shell: bash
+      env:
+        OUT_DIR: ${{ steps.detect.outputs.out-dir }}
+        AUDIT_S3_BUCKET: ${{ inputs.audit-s3-bucket }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: bash "${{ github.action_path }}/scripts/s3_audit.sh"
+
+    - name: Upload plan artifact
+      if: inputs.upload-plan-artifact == 'true' && steps.detect.outputs.out-dir != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-drift-${{ inputs.environment }}-${{ github.run_attempt }}
+        path: |
+          ${{ steps.detect.outputs.out-dir }}/plan.txt
+          ${{ steps.detect.outputs.out-dir }}/plan.json
+          ${{ steps.detect.outputs.out-dir }}/summary.json
+          ${{ steps.detect.outputs.out-dir }}/summary.md
+          ${{ steps.detect.outputs.out-dir }}/attribution.json
+        if-no-files-found: ignore
+
+    - name: Enforce result
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.detect.outputs.exit-code }}
+        FAIL_ON_DRIFT: ${{ inputs.fail-on-drift }}
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        if [ "$EXIT_CODE" != "0" ] && [ "$EXIT_CODE" != "2" ]; then
+          echo "::error::Drift check for '$ENVIRONMENT' failed to run (terraform error). See the plan output above."
+          exit 1
+        fi
+        if [ "$EXIT_CODE" = "2" ] && [ "$FAIL_ON_DRIFT" = "true" ]; then
+          echo "::error::Terraform drift detected in '$ENVIRONMENT'."
+          exit 1
+        fi
+        echo "Drift check for '$ENVIRONMENT' completed (exit code $EXIT_CODE)."
