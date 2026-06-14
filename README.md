@@ -1,4 +1,4 @@
-# Terraform Drift Detector - Testing for Other Providers
+# Terraform Drift Detector - Beta Testing for Other Providers
 
 A reusable GitHub Action that detects when your real infrastructure has diverged from
 Terraform state/code — on a schedule, with Slack alerts for production drift, a GitHub
